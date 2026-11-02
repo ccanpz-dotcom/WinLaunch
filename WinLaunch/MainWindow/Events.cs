@@ -1,15 +1,19 @@
-﻿using Microsoft.Win32;
+using Microsoft.Win32;
 using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 namespace WinLaunch
@@ -33,7 +37,9 @@ namespace WinLaunch
         {
             SBItem Item = ((e.Source as MenuItem).DataContext as SBItem);
 
-            SBM.RemoveItem(Item, false);
+            SBM.RemoveItem(Item, true);
+
+            PerformItemBackup();
         }
 
         private void miOpen_Click(object sender, RoutedEventArgs e)
@@ -104,9 +110,9 @@ namespace WinLaunch
         #endregion
 
         #region Main Context Menu
-        private void miRefreshInstalledApps_Clicked(object sender, RoutedEventArgs e)
+        private void miAddDefaultApps_Clicked(object sender, RoutedEventArgs e)
         {
-            if (MessageBox.Show(TranslationSource.Instance["ReallyRefreshInstalledApps"], TranslationSource.Instance["RefreshInstalledApps"], MessageBoxButton.YesNo) == MessageBoxResult.Yes)
+            if (MessageBox.Show(TranslationSource.Instance["ReallyAddDefaultApps"], TranslationSource.Instance["AddDefaultApps"], MessageBoxButton.YesNo) == MessageBoxResult.Yes)
             {
                 AddDefaultApps();
             }
@@ -125,6 +131,13 @@ namespace WinLaunch
                 {
                     AddFile(fileName);
                 }
+
+                if (Settings.CurrentSettings.SortItemsAlphabetically || Settings.CurrentSettings.SortFolderContentsOnly)
+                {
+                    SortItemsAlphabetically();
+                }
+
+                PerformItemBackup();
             }
         }
 
@@ -135,6 +148,13 @@ namespace WinLaunch
             if (ofd.ShowDialog() == System.Windows.Forms.DialogResult.OK)
             {
                 AddFile(ofd.SelectedPath);
+
+                if (Settings.CurrentSettings.SortItemsAlphabetically || Settings.CurrentSettings.SortFolderContentsOnly)
+                {
+                    SortItemsAlphabetically();
+                }
+
+                PerformItemBackup();
             }
         }
 
@@ -146,6 +166,13 @@ namespace WinLaunch
             if ((bool)dialog.ShowDialog())
             {
                 AddFile(dialog.URL);
+
+                if (Settings.CurrentSettings.SortItemsAlphabetically || Settings.CurrentSettings.SortFolderContentsOnly)
+                {
+                    SortItemsAlphabetically();
+                }
+
+                PerformItemBackup();
             }
         }
 
@@ -162,7 +189,6 @@ namespace WinLaunch
                 PerformItemBackup();
 
                 hotCorner.Active = false;
-                wka.StopListening();
 
                 MainWindow.WindowRef.Close();
                 Environment.Exit(0);
@@ -178,6 +204,7 @@ namespace WinLaunch
         #endregion
 
         #region MainCanvas events
+
         //patch events through
         private void MainCanvas_MouseDown(object sender, MouseButtonEventArgs e)
         {
@@ -230,7 +257,7 @@ namespace WinLaunch
             if (SBM != null)
             {
                 SBM.UpdateDisplayRect(new Rect(0.0, 0.0, e.NewSize.Width, e.NewSize.Height));
-                SBM.GM.SetGridPositions(0,0,true);
+                SBM.GM.SetGridPositions();
 
                 if (SBM.FolderOpen)
                 {
@@ -250,7 +277,7 @@ namespace WinLaunch
         private SBItem LaunchedItem = null;
 
         //handles events from sbm
-        public void ItemActivated(object sender, EventArgs e, bool RunAsAdmin = false, bool closeWindow = true)
+        public void ItemActivated(object sender, EventArgs e, bool RunAsAdmin = false)
         {
             try
             {
@@ -264,63 +291,70 @@ namespace WinLaunch
                     return;
                 }
 
-                //launch it
-                if (!Item.IsFolder)
+                if (EditExtensionActive)
                 {
-                    try
+                    RunEditExtension(Item);
+                }
+                else
+                {
+                    //launch it
+                    if (!Item.IsFolder)
                     {
-                        string path = Item.ApplicationPath;
-                        bool isLnk = false;
-
-                        if (Path.GetExtension(path).ToLower() == ".lnk")
+                        try
                         {
-                            isLnk = true;
+                            string path = Item.ApplicationPath;
+                            bool isLnk = false;
 
-                            if (ItemCollection.IsInCache(Item.ApplicationPath))
+                            if (Path.GetExtension(path).ToLower() == ".lnk")
                             {
-                                path = Path.Combine(PortabilityManager.LinkCachePath, path);
-                                path = Path.GetFullPath(path);
-                            }
-                        }
+                                isLnk = true;
 
-                        if (System.IO.File.Exists(path) || System.IO.Directory.Exists(path) || Uri.IsWellFormedUriString(path, UriKind.Absolute))
-                        {
-                            CleanMemory();
-
-                            if (!Settings.CurrentSettings.DeskMode && closeWindow)
-                            {
-                                StartLaunchAnimations(Item);
-                                LaunchedItem = Item;
-                            }
-
-                            new Thread(new ThreadStart(() =>
-                            {
-                                try
+                                if (ItemCollection.IsInCache(Item.ApplicationPath))
                                 {
-                                    ProcessStartInfo startInfo = new ProcessStartInfo();
-                                    startInfo.UseShellExecute = true;
-                                    startInfo.FileName = path;
-                                    startInfo.Arguments = Item.Arguments;
-
-                                    if (!isLnk)
-                                    {
-                                        startInfo.WorkingDirectory = Path.GetDirectoryName(path);
-                                    }
-
-                                    if (Item.RunAsAdmin || RunAsAdmin)
-                                    {
-                                        startInfo.Verb = "runas";
-                                    }
-
-                                    Process.Start(startInfo);
+                                    path = Path.Combine(PortabilityManager.LinkCachePath, path);
+                                    path = Path.GetFullPath(path);
                                 }
-                                catch (Exception ex) { }
-                            })).Start();
+                            }
+
+                            if (System.IO.File.Exists(path) || System.IO.Directory.Exists(path) || Uri.IsWellFormedUriString(path, UriKind.Absolute))
+                            {
+                                CleanMemory();
+
+                                if (!Settings.CurrentSettings.DeskMode)
+                                {
+                                    StartLaunchAnimations(Item);
+                                    LaunchedItem = Item;
+                                }
+
+                                new Thread(new ThreadStart(() =>
+                                {
+                                    try
+                                    {
+                                        ProcessStartInfo startInfo = new ProcessStartInfo();
+                                        startInfo.UseShellExecute = true;
+                                        startInfo.FileName = path;
+                                        startInfo.Arguments = Item.Arguments;
+
+                                        if (!isLnk)
+                                        {
+                                            startInfo.WorkingDirectory = Path.GetDirectoryName(path);
+                                        }
+
+                                        if (Item.RunAsAdmin || RunAsAdmin)
+                                        {
+                                            startInfo.Verb = "runas";
+                                        }
+
+                                        Process.Start(startInfo);
+                                    }
+                                    catch (Exception ex) { }
+                                })).Start();
+                            }
                         }
-                    }
-                    catch //(Exception ex)
-                    {
-                        //MessageBox.Show(ex.Message);
+                        catch //(Exception ex)
+                        {
+                            //MessageBox.Show(ex.Message);
+                        }
                     }
                 }
             }
@@ -341,8 +375,6 @@ namespace WinLaunch
         private void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
             WindowRef = this;
-
-            gdAssistant.Visibility = Visibility.Hidden;
 
             //Init DPI Scaling
             MiscUtils.GetDPIScale();
@@ -393,12 +425,6 @@ namespace WinLaunch
                             //add default apps
                             AddDefaultApps();
                         }
-
-                        //Init Assistant after loading items because it needs to build item grammar
-                        InitAssistant();
-
-                        //fly items in 
-                        StartFlyInAnimation();
                     }
                     catch (Exception ex)
                     {
@@ -439,7 +465,6 @@ namespace WinLaunch
 
             //framework events
             CompositionTargetEx.FrameUpdating += RenderFrame;
-            Microsoft.Win32.SystemEvents.DisplaySettingsChanged += SystemEvents_DisplaySettingsChanged;
 
             //misc events
             WPWatch.WallpaperChanged += new EventHandler(WPWatch_Changed);
@@ -490,97 +515,14 @@ namespace WinLaunch
             e.Handled = true;
         }
 
-        //update window size when display settings change
-        private void SystemEvents_DisplaySettingsChanged(object sender, EventArgs e)
-        {
-            MiscUtils.UpdateDPIScale();
-            UpdateWindowPosition();
-        }
-
-        private void SBM_ItemsUpdated(object sender, ItemsUpdatedEventArgs e)
+        private void SBM_ItemsUpdated(object sender, EventArgs e)
         {
             if (Settings.CurrentSettings.SortItemsAlphabetically || Settings.CurrentSettings.SortFolderContentsOnly)
             {
                 SortItemsAlphabetically();
             }
 
-            TriggerSaveItemsDelayed();
-
-            if(e.Action != ItemsUpdatedAction.Moved)
-            {
-                TriggerUpdateAssistantItemsTimer();
-            }
-        }
-
-        DispatcherTimer UpdateAssistantItemsTimer;
-        void TriggerUpdateAssistantItemsTimer()
-        {
-            //start timer to avoid saving items too often
-            if (UpdateAssistantItemsTimer != null)
-            {
-                UpdateAssistantItemsTimer.Stop();
-                UpdateAssistantItemsTimer.Tick -= SaveItemsTimer_Tick;
-                UpdateAssistantItemsTimer = null;
-            }
-
-            UpdateAssistantItemsTimer = new DispatcherTimer();
-            UpdateAssistantItemsTimer.Tick += UpdateAssistantItemsTimer_Tick; ;
-            UpdateAssistantItemsTimer.Interval = TimeSpan.FromSeconds(1);
-            UpdateAssistantItemsTimer.Start();
-        }
-
-        private void UpdateAssistantItemsTimer_Tick(object sender, EventArgs e)
-        {
-            UpdateAssistantItemsTimer.Stop();
-
-            //for now just disconnect / reconnect
-            TransitionAssistantState(AssistantState.Disconnected);
-
-            //update trie
-            RichTextBoxHelper.itemsTrie = SBM.IC.BuildItemTrie();
-        }
-
-        DispatcherTimer SaveItemsTimer;
-        void TriggerSaveItemsDelayed()
-        {
-            //start timer to avoid saving items too often
-            if (SaveItemsTimer != null)
-            {
-                SaveItemsTimer.Stop();
-                SaveItemsTimer.Tick -= SaveItemsTimer_Tick;
-                SaveItemsTimer = null;
-            }
-
-            SaveItemsTimer = new DispatcherTimer();
-            SaveItemsTimer.Tick += SaveItemsTimer_Tick;
-            SaveItemsTimer.Interval = TimeSpan.FromSeconds(3);
-            SaveItemsTimer.Start();
-        }
-
-        private void SaveItemsTimer_Tick(object sender, EventArgs e)
-        {
-            SaveItemsTimer.Stop();
-
             PerformItemBackup();
-        }
-
-        //gets called whenever a backup should be performed
-        public void PerformItemBackup()
-        {
-            SBM.EndSearch();
-
-            if (LoadingAssets)
-                return;
-
-            try
-            {
-                SBM.IC.SaveToXML(PortabilityManager.ItemsPath);
-                backupManager.AddBackup(PortabilityManager.ItemsPath);
-            }
-            catch (Exception e)
-            {
-                MessageBox.Show("Could not save items" + e.Message);
-            }
         }
 
         private static void InitLocalization()
@@ -596,8 +538,6 @@ namespace WinLaunch
                 TranslationSource.Instance.CurrentCulture = new CultureInfo("en-US");
             }
         }
-
-        bool JustOpened = true;
 
         private void MainWindow_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
         {
@@ -617,31 +557,7 @@ namespace WinLaunch
             }
             else
             {
-                if (currentAssistantState == AssistantState.Login)
-                {
-                    if (JustOpened)
-                    { 
-                        Keyboard.Focus(tbxAssistantEmail);
-                        JustOpened = false;
-                    }
-                }
-                else
-                {
-                    if (AssistantActive)
-                    {
-                        if(JustOpened)
-                        {
-                            Keyboard.Focus(tbAssistant);
-                            JustOpened = false;
-                        }
-                            
-                    }
-                    else
-                    {
-                        Keyboard.Focus(tbSearch);
-                    }
-                }
-                   
+                Keyboard.Focus(tbSearch);
             }
         }
 
@@ -743,10 +659,23 @@ namespace WinLaunch
 
         private void InitWindowsKeyActivation()
         {
+            wka.Activated += Wka_Activated;
+
             if (Settings.CurrentSettings.WindowsKeyActivationEnabled && !Settings.CurrentSettings.DeskMode)
             {
                 wka.StartListening();
             }
+        }
+        private void Wka_Activated(object sender, EventArgs e)
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (!ActivatorsEnabled || Settings.CurrentSettings.DeskMode)
+                    return;
+
+                DebugLog.WriteToLogFile("Windows key activated");
+                ToggleLaunchpad();
+            }));
         }
 
         #endregion WindowsKeyActivation
@@ -868,45 +797,8 @@ namespace WinLaunch
 
             ToggleLaunchpad();
         }
+
         #endregion Hotkey
-
-        #region VoiceActivation
-        VoiceActivation voiceActivation = new VoiceActivation();
-
-        void InitVoiceActivation()
-        {
-            voiceActivation.OpenActivated += VoiceActivation_OpenActivated;
-            voiceActivation.CloseActivated += VoiceActivation_CloseActivated;
-
-            if (Settings.CurrentSettings.VoiceActivation)
-            {
-                voiceActivation.StartListening();
-            }
-        }
-
-        private void VoiceActivation_CloseActivated(object sender, EventArgs e)
-        {
-            if (!ActivatorsEnabled)
-                return;
-
-            if (!IsHidden)
-            {
-                ToggleLaunchpad();
-            }
-        }
-
-        private void VoiceActivation_OpenActivated(object sender, EventArgs e)
-        {
-            if (!ActivatorsEnabled)
-                return;
-
-            if (IsHidden)
-            {
-                ToggleLaunchpad();
-            }
-        }
-        #endregion
-
         #endregion Activators
 
         #region Input
@@ -1010,9 +902,6 @@ namespace WinLaunch
 
             if (FolderRenamingActive)
                 return;
-            
-            if (AssistantActive)
-                return;
 
             e.Handled = false;
         }
@@ -1024,16 +913,13 @@ namespace WinLaunch
 
             if (FolderRenamingActive)
                 return;
-            
+
             if (e.Key == Key.Escape)
             {
                 ToggleLaunchpad();
 
                 return;
             }
-
-            if (AssistantActive)
-                return;
 
             if (e.Key == Key.Left || e.Key == Key.Right || e.Key == Key.Down || e.Key == Key.Up || e.Key == Key.Enter)
             {
@@ -1082,6 +968,13 @@ namespace WinLaunch
             {
                 AddFile(File);
             }
+
+            if (Settings.CurrentSettings.SortItemsAlphabetically || Settings.CurrentSettings.SortFolderContentsOnly)
+            {
+                SortItemsAlphabetically();
+            }
+
+            PerformItemBackup();
 
             if (!IsDesktopChild)
                 Keyboard.ClearFocus();
